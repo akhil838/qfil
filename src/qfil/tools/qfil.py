@@ -6,6 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from qfil.logging import get_logger
+from qfil.progress import EntryProgress
 from qfil.protocol import FirehoseClient, FirehoseConfig, SaharaClient
 from qfil.software_fix import (
     QfilPlan,
@@ -31,7 +33,14 @@ def run_qfil_plan(plan: QfilPlan, dry_run: bool = True) -> None:
         return
     if not plan.programmer:
         raise RuntimeError("QFIL plan does not include a QSahara programmer loader.")
+    get_logger(__name__).info("Opening Qualcomm 9008 USB transport for Sahara/Firehose")
+    progress = EntryProgress("firehose")
     with QualcommUsbTransport.auto() as transport:
+        get_logger(__name__).info(
+            "Uploading programmer: %s image_id=%s",
+            plan.programmer.loader,
+            plan.programmer.image_id,
+        )
         SaharaClient(transport).upload_programmer(
             plan.programmer.loader, plan.programmer.image_id
         )
@@ -42,18 +51,25 @@ def run_qfil_plan(plan: QfilPlan, dry_run: bool = True) -> None:
                 zlpawarehost=1 if plan.firehose.zlpawarehost else 0,
             ),
         )
+        get_logger(__name__).info(
+            "Configuring Firehose: memory=%s", plan.firehose.memory or "ufs"
+        )
         client.configure()
         if plan.firehose.set_active_partition is not None:
+            get_logger(__name__).info(
+                "Setting active storage drive: %s",
+                plan.firehose.set_active_partition,
+            )
             client.set_bootable_storage_drive(plan.firehose.set_active_partition)
-        for xml_path in [*plan.firehose.rawprograms, *plan.firehose.patches]:
-            client.process_xml_file(xml_path, plan.image_dir, progress=_print_progress)
+        try:
+            for xml_path in [*plan.firehose.rawprograms, *plan.firehose.patches]:
+                get_logger(__name__).info("Processing Firehose XML: %s", xml_path)
+                client.process_xml_file(xml_path, plan.image_dir, progress=progress)
+        finally:
+            progress.close()
         if plan.firehose.reset:
+            get_logger(__name__).info("Resetting target after flash")
             client.reset()
-
-
-def _print_progress(entry, written: int, total: int) -> None:
-    percent = 100.0 if total == 0 else (written / total) * 100
-    print(f"{entry.label}: {percent:5.1f}% {written}/{total}", flush=True)
 
 
 class QfilTool:
@@ -62,14 +78,14 @@ class QfilTool:
 
     def inspect(self, show_programs: bool = False) -> None:
         for line in summarize_plan(self.plan):
-            print(line)
-        print("\nNative module command:")
-        print(" ".join(build_qfil_module_command(self.plan)))
+            get_logger(__name__).info(line)
+        get_logger(__name__).info("\nNative module command:")
+        get_logger(__name__).info(" ".join(build_qfil_module_command(self.plan)))
         if show_programs:
-            print("\nProgram entries:")
+            get_logger(__name__).info("\nProgram entries:")
             for entry in parse_program_entries(self.plan.firehose.rawprograms):
                 sectors = entry.sectors if entry.sectors is not None else "dynamic"
-                print(
+                get_logger(__name__).info(
                     f"{entry.xml.name}: {entry.filename} -> {entry.label} "
                     f"lun={entry.lun} start={entry.start_sector} sectors={sectors}"
                 )
@@ -92,9 +108,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--flash", action="store_true")
     args = parser.parse_args(argv)
     tool = QfilTool(args.startup_file, args.image_dir)
-    tool.inspect(show_programs=args.show_programs)
-    if args.flash:
-        tool.flash()
+    try:
+        tool.inspect(show_programs=args.show_programs)
+        if args.flash:
+            tool.flash()
+    except (RuntimeError, OSError) as exc:
+        get_logger(__name__).error("QFIL failed: %s", exc)
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

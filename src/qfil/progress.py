@@ -1,56 +1,53 @@
-"""Progress parsing helpers for QFIL/Firehose output."""
+"""Progress helpers for low-level Sahara/Firehose device writes."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-import re
+from pathlib import Path
+from typing import Any
 
-from .software_fix import ProgramEntry
-
-
-@dataclass(frozen=True)
-class FirehoseProgress:
-    percent: float
-    sector: int
-    total_sectors: int
-    speed: str
-    label: str | None = None
-    filename: str | None = None
-    lun: int | None = None
+from tqdm.auto import tqdm
 
 
-_PROGRESS_RE = re.compile(
-    r"Progress:\s+\|[^|]*\|\s*"
-    r"(?P<percent>[0-9]+(?:\.[0-9]+)?)%\s+Write\s+"
-    r"\(Sector\s+(?P<sector>0x[0-9A-Fa-f]+|\d+)\s+of\s+"
-    r"(?P<total>0x[0-9A-Fa-f]+|\d+)[^)]*\)\s*"
-    r"(?P<speed>[0-9.]+\s+\S+/s)?"
-)
+class EntryProgress:
+    """Render cumulative per-entry write callbacks as stable tqdm progress bars."""
 
+    def __init__(self, prefix: str = "flash"):
+        self.prefix = prefix
+        self._bar: tqdm | None = None
+        self._key: tuple[str, str, str] | None = None
+        self._written = 0
 
-def parse_firehose_progress(
-    line: str, entries: list[ProgramEntry] | None = None
-) -> FirehoseProgress | None:
-    match = _PROGRESS_RE.search(line)
-    if not match:
-        return None
-    total = int(match.group("total"), 0)
-    entry = _match_entry(total, entries or [])
-    return FirehoseProgress(
-        percent=float(match.group("percent")),
-        sector=int(match.group("sector"), 0),
-        total_sectors=total,
-        speed=(match.group("speed") or "").strip(),
-        label=entry.label if entry else None,
-        filename=entry.filename if entry else None,
-        lun=entry.lun if entry else None,
-    )
+    def __call__(self, entry: Any, written: int, total: int) -> None:
+        key = (
+            str(getattr(entry, "xml", "")),
+            str(getattr(entry, "filename", "")),
+            str(getattr(entry, "label", "")),
+        )
+        if key != self._key:
+            self.close()
+            label = str(getattr(entry, "label", "") or "partition")
+            filename = Path(str(getattr(entry, "filename", "") or label)).name
+            self._bar = tqdm(
+                total=total or None,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                desc=f"{self.prefix} {label} ({filename})",
+            )
+            self._key = key
+            self._written = 0
 
+        if self._bar is None:
+            return
+        delta = max(0, written - self._written)
+        self._bar.update(delta)
+        self._written = written
+        if total and written >= total:
+            self.close()
 
-def _match_entry(
-    total_sectors: int, entries: list[ProgramEntry]
-) -> ProgramEntry | None:
-    matches = [entry for entry in entries if entry.sectors == total_sectors]
-    if len(matches) == 1:
-        return matches[0]
-    return None
+    def close(self) -> None:
+        if self._bar is not None:
+            self._bar.close()
+        self._bar = None
+        self._key = None
+        self._written = 0

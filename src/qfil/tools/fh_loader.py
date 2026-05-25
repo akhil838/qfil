@@ -6,8 +6,9 @@ from dataclasses import dataclass
 import argparse
 from pathlib import Path
 
+from qfil.logging import get_logger
+from qfil.progress import EntryProgress
 from qfil.protocol import FirehoseClient, FirehoseConfig
-from qfil.software_fix import ProgramEntry
 from qfil.usb import QualcommUsbTransport
 
 
@@ -30,6 +31,12 @@ class FhLoaderTool:
         self.options = options
 
     def run(self) -> None:
+        get_logger(__name__).info(
+            "Opening Qualcomm USB transport: vid=0x%04x pid=0x%04x",
+            self.options.vid,
+            self.options.pid,
+        )
+        progress = EntryProgress("fh_loader")
         with QualcommUsbTransport(self.options.vid, self.options.pid) as transport:
             client = FirehoseClient(
                 transport,
@@ -38,20 +45,27 @@ class FhLoaderTool:
                     zlpawarehost=1 if self.options.zlpawarehost else 0,
                 ),
             )
+            get_logger(__name__).info(
+                "Configuring Firehose: memory=%s", self.options.memoryname
+            )
             client.configure()
             if self.options.setactivepartition is not None:
-                client.set_bootable_storage_drive(self.options.setactivepartition)
-            for xml_path in self.options.sendxml:
-                client.process_xml_file(
-                    xml_path, self.options.search_path, progress=self._progress
+                get_logger(__name__).info(
+                    "Setting active storage drive: %s",
+                    self.options.setactivepartition,
                 )
+                client.set_bootable_storage_drive(self.options.setactivepartition)
+            try:
+                for xml_path in self.options.sendxml:
+                    get_logger(__name__).info("Processing Firehose XML: %s", xml_path)
+                    client.process_xml_file(
+                        xml_path, self.options.search_path, progress=progress
+                    )
+            finally:
+                progress.close()
             if self.options.reset:
+                get_logger(__name__).info("Resetting target after flash")
                 client.reset()
-
-    @staticmethod
-    def _progress(entry: ProgramEntry, written: int, total: int) -> None:
-        percent = 100.0 if total == 0 else (written / total) * 100
-        print(f"{entry.label}: {percent:5.1f}% {written}/{total}", flush=True)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -79,18 +93,22 @@ def main(argv: list[str] | None = None) -> None:
         for value in raw_value.split(",")
         if value.strip()
     )
-    FhLoaderTool(
-        FhLoaderOptions(
-            sendxml=sendxml,
-            search_path=search_path,
-            memoryname=args.memoryname.lower(),
-            setactivepartition=args.setactivepartition,
-            reset=args.reset,
-            zlpawarehost=bool(args.zlpawarehost),
-            vid=args.vid,
-            pid=args.pid,
-        )
-    ).run()
+    try:
+        FhLoaderTool(
+            FhLoaderOptions(
+                sendxml=sendxml,
+                search_path=search_path,
+                memoryname=args.memoryname.lower(),
+                setactivepartition=args.setactivepartition,
+                reset=args.reset,
+                zlpawarehost=bool(args.zlpawarehost),
+                vid=args.vid,
+                pid=args.pid,
+            )
+        ).run()
+    except (RuntimeError, OSError) as exc:
+        get_logger(__name__).error("fh_loader failed: %s", exc)
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":
