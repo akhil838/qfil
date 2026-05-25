@@ -1,0 +1,97 @@
+"""fh_loader.exe compatible native entrypoint."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import argparse
+from pathlib import Path
+
+from qfil.protocol import FirehoseClient, FirehoseConfig
+from qfil.software_fix import ProgramEntry
+from qfil.usb import QualcommUsbTransport
+
+
+@dataclass(frozen=True)
+class FhLoaderOptions:
+    sendxml: tuple[Path, ...]
+    search_path: Path
+    memoryname: str = "ufs"
+    setactivepartition: int | None = None
+    reset: bool = False
+    zlpawarehost: bool = True
+    vid: int = 0x05C6
+    pid: int = 0x9008
+
+
+class FhLoaderTool:
+    """Native equivalent for the fh_loader subset used by Lenovo Rescue.cmd."""
+
+    def __init__(self, options: FhLoaderOptions):
+        self.options = options
+
+    def run(self) -> None:
+        with QualcommUsbTransport(self.options.vid, self.options.pid) as transport:
+            client = FirehoseClient(
+                transport,
+                FirehoseConfig(
+                    memory=self.options.memoryname,
+                    zlpawarehost=1 if self.options.zlpawarehost else 0,
+                ),
+            )
+            client.configure()
+            if self.options.setactivepartition is not None:
+                client.set_bootable_storage_drive(self.options.setactivepartition)
+            for xml_path in self.options.sendxml:
+                client.process_xml_file(
+                    xml_path, self.options.search_path, progress=self._progress
+                )
+            if self.options.reset:
+                client.reset()
+
+    @staticmethod
+    def _progress(entry: ProgramEntry, written: int, total: int) -> None:
+        percent = 100.0 if total == 0 else (written / total) * 100
+        print(f"{entry.label}: {percent:5.1f}% {written}/{total}", flush=True)
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="fh_loader", description="Native fh_loader-compatible Firehose runner."
+    )
+    parser.add_argument("--sendxml", action="append", default=[])
+    parser.add_argument("--search_path", type=Path, default=Path("."))
+    parser.add_argument("--memoryname", default="ufs")
+    parser.add_argument("--setactivepartition", type=lambda value: int(value, 0))
+    parser.add_argument("--reset", action="store_true")
+    parser.add_argument("--zlpawarehost", type=int, default=1)
+    parser.add_argument("--vid", type=lambda value: int(value, 0), default=0x05C6)
+    parser.add_argument("--pid", type=lambda value: int(value, 0), default=0x9008)
+    parser.add_argument(
+        "--port", help="Accepted for compatibility; USB auto-detection is used."
+    )
+    parser.add_argument("--noprompt", action="store_true")
+    parser.add_argument("--showpercentagecomplete", action="store_true")
+    args = parser.parse_args(argv)
+    search_path = args.search_path.resolve()
+    sendxml = tuple(
+        (search_path / value.strip()).resolve()
+        for raw_value in args.sendxml
+        for value in raw_value.split(",")
+        if value.strip()
+    )
+    FhLoaderTool(
+        FhLoaderOptions(
+            sendxml=sendxml,
+            search_path=search_path,
+            memoryname=args.memoryname.lower(),
+            setactivepartition=args.setactivepartition,
+            reset=args.reset,
+            zlpawarehost=bool(args.zlpawarehost),
+            vid=args.vid,
+            pid=args.pid,
+        )
+    ).run()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qfil"
+version = "0.1.0"
+description = "Native Python QFIL/QSahara/Firehose tooling"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pyusb>=1.1.0",
+]
+
+[dependency-groups]
+dev = [
+  "ruff>=0.14.0",
+  "ty>=0.0.1a20",
+]
+
+[project.scripts]
+qfil = "qfil.tools.qfil:main"
+fh_loader = "qfil.tools.fh_loader:main"
+qsaharaserver = "qfil.tools.qsahara_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["qfil*"]
+
+[tool.uv]
+package = true
