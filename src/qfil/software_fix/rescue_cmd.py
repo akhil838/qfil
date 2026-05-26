@@ -25,6 +25,7 @@ class FirehoseOptions:
     zlpawarehost: bool
     noprompt: bool
     showpercentagecomplete: bool
+    verify_programming: bool
 
 
 @dataclass(frozen=True)
@@ -173,6 +174,7 @@ def _parse_firehose(
         zlpawarehost=_has_option(line, "zlpawarehost"),
         noprompt=_has_option(line, "noprompt"),
         showpercentagecomplete=_has_option(line, "showpercentagecomplete"),
+        verify_programming=_has_option(line, "verify_programming"),
     )
 
 

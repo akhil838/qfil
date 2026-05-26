@@ -20,6 +20,17 @@ class FhLoaderOptions:
     setactivepartition: int | None = None
     reset: bool = False
     zlpawarehost: bool = True
+    skipstorageinit: int = 0
+    skipwrite: int = 0
+    maxpayloadsizetotargetinbytes: int = 1024 * 1024
+    maxpayloadsizefromtargetinbytes: int = 8192
+    maxxmlsizeinbytes: int = 4096
+    verbose: int = 0
+    alwaysvalidate: int = 0
+    maxdigesttablesizeinbytes: int = 2048
+    getstorageinfo: int | None = None
+    fixgpt: int | None = None
+    verify_programming: bool = False
     vid: int = 0x05C6
     pid: int = 0x9008
 
@@ -43,12 +54,33 @@ class FhLoaderTool:
                 FirehoseConfig(
                     memory=self.options.memoryname,
                     zlpawarehost=1 if self.options.zlpawarehost else 0,
+                    skip_storage_init=self.options.skipstorageinit,
+                    skip_write=self.options.skipwrite,
+                    max_payload_to_target=(self.options.maxpayloadsizetotargetinbytes),
+                    max_payload_from_target=(
+                        self.options.maxpayloadsizefromtargetinbytes
+                    ),
+                    max_xml_size=self.options.maxxmlsizeinbytes,
+                    verbose=self.options.verbose,
+                    always_validate=self.options.alwaysvalidate,
+                    max_digest_table_size=(self.options.maxdigesttablesizeinbytes),
                 ),
             )
             get_logger(__name__).info(
                 "Configuring Firehose: memory=%s", self.options.memoryname
             )
             client.configure()
+            if self.options.getstorageinfo is not None:
+                get_logger(__name__).info(
+                    "Reading Firehose storage info: lun=%s",
+                    self.options.getstorageinfo,
+                )
+                client.get_storage_info(self.options.getstorageinfo)
+            if self.options.fixgpt is not None:
+                get_logger(__name__).info(
+                    "Sending Firehose fixgpt: lun=%s", self.options.fixgpt
+                )
+                client.fix_gpt(self.options.fixgpt)
             if self.options.setactivepartition is not None:
                 get_logger(__name__).info(
                     "Setting active storage drive: %s",
@@ -59,7 +91,10 @@ class FhLoaderTool:
                 for xml_path in self.options.sendxml:
                     get_logger(__name__).info("Processing Firehose XML: %s", xml_path)
                     client.process_xml_file(
-                        xml_path, self.options.search_path, progress=progress
+                        xml_path,
+                        self.options.search_path,
+                        progress=progress,
+                        verify_programming=self.options.verify_programming,
                     )
             finally:
                 progress.close()
@@ -78,6 +113,33 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--setactivepartition", type=lambda value: int(value, 0))
     parser.add_argument("--reset", action="store_true")
     parser.add_argument("--zlpawarehost", type=int, default=1)
+    parser.add_argument("--skipstorageinit", type=int, default=0)
+    parser.add_argument("--skipwrite", type=int, default=0)
+    parser.add_argument(
+        "--maxpayloadsizetotargetinbytes",
+        type=lambda value: int(value, 0),
+        default=1024 * 1024,
+    )
+    parser.add_argument(
+        "--maxpayloadsizefromtargetinbytes",
+        type=lambda value: int(value, 0),
+        default=8192,
+    )
+    parser.add_argument(
+        "--maxxmlsizeinbytes",
+        type=lambda value: int(value, 0),
+        default=4096,
+    )
+    parser.add_argument("--verbose", type=int, default=0)
+    parser.add_argument("--alwaysvalidate", type=int, default=0)
+    parser.add_argument(
+        "--maxdigesttablesizeinbytes",
+        type=lambda value: int(value, 0),
+        default=2048,
+    )
+    parser.add_argument("--getstorageinfo", type=lambda value: int(value, 0))
+    parser.add_argument("--fixgpt", type=lambda value: int(value, 0))
+    parser.add_argument("--verify_programming", action="store_true")
     parser.add_argument("--vid", type=lambda value: int(value, 0), default=0x05C6)
     parser.add_argument("--pid", type=lambda value: int(value, 0), default=0x9008)
     parser.add_argument(
@@ -102,6 +164,17 @@ def main(argv: list[str] | None = None) -> None:
                 setactivepartition=args.setactivepartition,
                 reset=args.reset,
                 zlpawarehost=bool(args.zlpawarehost),
+                skipstorageinit=args.skipstorageinit,
+                skipwrite=args.skipwrite,
+                maxpayloadsizetotargetinbytes=(args.maxpayloadsizetotargetinbytes),
+                maxpayloadsizefromtargetinbytes=(args.maxpayloadsizefromtargetinbytes),
+                maxxmlsizeinbytes=args.maxxmlsizeinbytes,
+                verbose=args.verbose,
+                alwaysvalidate=args.alwaysvalidate,
+                maxdigesttablesizeinbytes=args.maxdigesttablesizeinbytes,
+                getstorageinfo=args.getstorageinfo,
+                fixgpt=args.fixgpt,
+                verify_programming=args.verify_programming,
                 vid=args.vid,
                 pid=args.pid,
             )
