@@ -1,4 +1,7 @@
 .DS_Store
+.idea/
+.vscode/
+*.code-workspace
 __pycache__/
 *.py[cod]
 *.egg-info/

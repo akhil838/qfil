@@ -64,7 +64,12 @@ def run_qfil_plan(plan: QfilPlan, dry_run: bool = True) -> None:
         try:
             for xml_path in [*plan.firehose.rawprograms, *plan.firehose.patches]:
                 get_logger(__name__).info("Processing Firehose XML: %s", xml_path)
-                client.process_xml_file(xml_path, plan.image_dir, progress=progress)
+                client.process_xml_file(
+                    xml_path,
+                    plan.image_dir,
+                    progress=progress,
+                    verify_programming=plan.firehose.verify_programming,
+                )
         finally:
             progress.close()
         if plan.firehose.reset:
