@@ -3,14 +3,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
+import logging
 import time
 
 import usb.core
 import usb.util
 
+log = logging.getLogger(__name__)
+
 
 class UsbTransportError(RuntimeError):
     pass
+
+
+def _is_timeout_error(exc: Exception) -> bool:
+    """Return True for both PyUSB and OS-level USB timeout errors."""
+    if isinstance(exc, usb.core.USBTimeoutError):
+        return True
+    if isinstance(exc, OSError) and exc.errno in (errno.ETIMEDOUT, errno.ETIME):
+        return True
+    return False
 
 
 DEFAULT_USB_IDS = ((0x05C6, 0x9008), (0x05C6, 0x900E))
@@ -84,7 +97,7 @@ class QualcommUsbTransport:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
-    def write(self, data: bytes) -> None:
+    def write(self, data: bytes, retries: int = 3) -> None:
         if self.ep_out is None:
             raise UsbTransportError("USB transport is not open.")
         if not data:
@@ -95,9 +108,21 @@ class QualcommUsbTransport:
             return
         view = memoryview(data)
         for offset in range(0, len(view), self.write_chunk_size):
-            self.ep_out.write(
-                view[offset : offset + self.write_chunk_size], timeout=self.timeout_ms
-            )
+            chunk = view[offset : offset + self.write_chunk_size]
+            for attempt in range(retries):
+                try:
+                    self.ep_out.write(chunk, timeout=self.timeout_ms)
+                    break
+                except Exception as exc:
+                    if _is_timeout_error(exc) and attempt < retries - 1:
+                        log.warning(
+                            "USB write timeout (attempt %d/%d), retrying...",
+                            attempt + 1,
+                            retries,
+                        )
+                        time.sleep(1)
+                        continue
+                    raise
 
     def read(self, size: int = 1024 * 1024, timeout_ms: int | None = None) -> bytes:
         if self.ep_in is None:
@@ -105,8 +130,10 @@ class QualcommUsbTransport:
         timeout = self.timeout_ms if timeout_ms is None else timeout_ms
         try:
             return bytes(self.ep_in.read(size, timeout=timeout))
-        except usb.core.USBTimeoutError:
-            return b""
+        except Exception as exc:
+            if _is_timeout_error(exc):
+                return b""
+            raise
 
     def read_until(self, marker: bytes, timeout_s: float = 10.0) -> bytes:
         deadline = time.monotonic() + timeout_s
