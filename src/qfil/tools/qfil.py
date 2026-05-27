@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 from qfil.logging import get_logger
@@ -15,7 +16,7 @@ from qfil.software_fix import (
     parse_rescue_cmd,
     summarize_plan,
 )
-from qfil.usb import QualcommUsbTransport
+from qfil.usb import QualcommUsbTransport, UsbTransportError
 
 
 def build_qfil_module_command(plan: QfilPlan) -> list[str]:
@@ -44,6 +45,7 @@ def run_qfil_plan(plan: QfilPlan, dry_run: bool = True) -> None:
         SaharaClient(transport).upload_programmer(
             plan.programmer.loader, plan.programmer.image_id
         )
+        _reopen_transport_for_firehose(transport)
         client = FirehoseClient(
             transport,
             FirehoseConfig(
@@ -75,6 +77,23 @@ def run_qfil_plan(plan: QfilPlan, dry_run: bool = True) -> None:
         if plan.firehose.reset:
             get_logger(__name__).info("Resetting target after flash")
             client.reset()
+
+
+def _reopen_transport_for_firehose(transport: QualcommUsbTransport) -> None:
+    get_logger(__name__).info("Reopening USB transport for Firehose")
+    transport.close()
+    deadline = time.monotonic() + 8
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        time.sleep(0.25)
+        try:
+            transport.open()
+            return
+        except (UsbTransportError, OSError) as exc:
+            last_error = exc
+    raise UsbTransportError(
+        "Programmer upload completed, but Qualcomm USB transport did not reopen for Firehose."
+    ) from last_error
 
 
 class QfilTool:

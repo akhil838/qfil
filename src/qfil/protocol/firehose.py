@@ -4,14 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import logging
 import os
 from pathlib import Path
 import re
+import time
 from typing import BinaryIO, Protocol, cast
 import xml.etree.ElementTree as ET
 
 from qfil.images import SparseImageReader, is_sparse_image
 from qfil.software_fix import ProgramEntry
+
+log = logging.getLogger(__name__)
 
 
 class FirehoseError(RuntimeError):
@@ -48,7 +52,7 @@ class FirehoseClient:
         self.transport = transport
         self.config = config or FirehoseConfig()
 
-    def configure(self) -> None:
+    def configure(self, retries: int = 5, retry_delay: float = 2.0) -> None:
         xml = (
             '<?xml version="1.0" encoding="UTF-8" ?><data>'
             f'<configure MemoryName="{self.config.memory}" '
@@ -61,7 +65,26 @@ class FirehoseClient:
             f'SkipWrite="{self.config.skip_write}"/>'
             "</data>"
         )
-        response = self.xml(xml)
+        response = None
+        for attempt in range(retries):
+            try:
+                response = self.xml(xml, timeout_s=15.0)
+                break
+            except (FirehoseError, OSError) as exc:
+                if attempt < retries - 1:
+                    log.warning(
+                        "Firehose configure attempt %d/%d failed: %s — retrying in %.0fs",
+                        attempt + 1,
+                        retries,
+                        exc,
+                        retry_delay,
+                    )
+                    time.sleep(retry_delay)
+                else:
+                    raise FirehoseError(
+                        f"Firehose configure failed after {retries} attempts: {exc}"
+                    ) from exc
+        assert response is not None
         attrs = response.attributes
         self.config.memory = attrs.get("MemoryName", self.config.memory).lower()
         self.config.max_payload_to_target = int(
@@ -337,9 +360,16 @@ class FirehoseClient:
         raw = self.transport.read_until(b"<response", timeout_s=timeout_s)
         if b"<response" in raw and b"</data>" not in raw:
             raw += self.transport.read_until(b"</data>", timeout_s=2)
-        response = FirehoseResponse.from_bytes(raw)
         if not raw:
             raise FirehoseError("Timed out waiting for Firehose response.")
+        log.debug("Raw response (%d bytes): %s", len(raw), raw)
+        response = FirehoseResponse.from_bytes(raw)
+        for entry in response.logs:
+            log.info("Device: %s", entry)
+        if response.ack:
+            log.debug("Device ACK: %s", response.attributes)
+        else:
+            log.warning("Device NAK: %s", response.raw_text[:500])
         return response
 
 
@@ -355,18 +385,21 @@ class FirehoseResponse:
         text = data.decode("utf-8", errors="replace")
         attrs: dict[str, str] = {}
         logs: list[str] = []
-        try:
-            root = ET.fromstring(_extract_xml(text))
-            logs.extend(
-                log.get("value", "")
-                for log in root.findall(".//log")
-                if log.get("value")
-            )
-            response = root.find(".//response")
-            if response is not None:
-                attrs = dict(response.attrib)
-        except ET.ParseError:
-            pass
+        # Parse each <data>...</data> block individually to handle
+        # multi-block responses (log messages + response concatenated).
+        for block_xml in _iter_data_blocks(text):
+            try:
+                root = ET.fromstring(block_xml)
+                logs.extend(
+                    elem.get("value", "")
+                    for elem in root.findall(".//log")
+                    if elem.get("value")
+                )
+                response = root.find(".//response")
+                if response is not None:
+                    attrs = dict(response.attrib)
+            except ET.ParseError:
+                continue
         return cls(
             ack=attrs.get("value", "").upper() == "ACK",
             attributes=attrs,
@@ -375,7 +408,43 @@ class FirehoseResponse:
         )
 
 
+def _iter_data_blocks(text: str) -> list[str]:
+    """Split concatenated Firehose XML into individual <data>...</data> blocks."""
+    blocks: list[str] = []
+    search_from = 0
+    while True:
+        start = text.find("<data", search_from)
+        if start == -1:
+            break
+        end = text.find("</data>", start)
+        if end == -1:
+            blocks.append(text[start:])
+            break
+        blocks.append(text[start : end + len("</data>")])
+        search_from = end + len("</data>")
+    if not blocks:
+        blocks.append(text)
+    return blocks
+
+
 def _extract_xml(text: str) -> str:
+    # When multiple <data> blocks are concatenated (log + response),
+    # extract the one containing <response>.
+    response_pos = text.find("<response")
+    if response_pos != -1:
+        # Find the <data> that wraps this <response>
+        start = text.rfind("<data", 0, response_pos)
+        if start == -1:
+            start = text.rfind("<?xml", 0, response_pos)
+        end = text.find("</data>", response_pos)
+        if start != -1 and end != -1:
+            # Wrap in a single root so log elements before <response> are included
+            block = text[start : end + len("</data>")]
+            # Strip any <?xml?> preamble inside the block
+            data_start = block.find("<data")
+            if data_start > 0:
+                block = block[data_start:]
+            return block
     start = text.find("<?xml")
     if start == -1:
         start = text.find("<data")

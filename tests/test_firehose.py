@@ -6,7 +6,12 @@ from pathlib import Path
 import unittest
 import xml.etree.ElementTree as ET
 
-from qfil.protocol.firehose import FirehoseClient, FirehoseConfig, FirehoseResponse
+from qfil.protocol.firehose import (
+    FirehoseClient,
+    FirehoseConfig,
+    FirehoseError,
+    FirehoseResponse,
+)
 
 
 ACK = b'<?xml version="1.0" ?><data><response value="ACK" /></data>'
@@ -247,6 +252,123 @@ class FirehoseTests(unittest.TestCase):
 
         seen = [_classify_write(write) for write in transport.writes if write]
         self.assertEqual(seen, ["program", "raw:ABCD", "getsha256digest"])
+
+
+class FailThenSucceedTransport:
+    """Transport that raises on the first N read_until calls, then succeeds."""
+
+    def __init__(self, fail_count: int, exc: Exception, success_response: bytes):
+        self.fail_count = fail_count
+        self.exc = exc
+        self.success_response = success_response
+        self.call_count = 0
+        self.writes: list[bytes] = []
+
+    def write(self, data: bytes) -> None:
+        self.writes.append(bytes(data))
+
+    def read_until(self, marker: bytes, timeout_s: float = 10.0) -> bytes:
+        self.call_count += 1
+        if self.call_count <= self.fail_count:
+            raise self.exc
+        return self.success_response
+
+    def read(self, size: int = 1024 * 1024, timeout_ms: int | None = None) -> bytes:
+        return b""
+
+
+class MultiBlockResponseTests(unittest.TestCase):
+    def test_response_parses_concatenated_log_and_response_blocks(self) -> None:
+        raw = (
+            b'<?xml version="1.0" encoding="UTF-8" ?>\n'
+            b"<data>\n"
+            b'<log value="INFO: Calling handler for configure" /></data>'
+            b'<?xml version="1.0" encoding="UTF-8" ?>\n'
+            b"<data>\n"
+            b'<log value="INFO: Storage type set to value UFS" /></data>'
+            b'<?xml version="1.0" encoding="UTF-8" ?>\n'
+            b"<data>\n"
+            b'<response value="ACK" MemoryName="UFS" '
+            b'MaxPayloadSizeToTargetInBytesSupported="1048576" /></data>'
+        )
+        response = FirehoseResponse.from_bytes(raw)
+
+        self.assertTrue(response.ack)
+        self.assertEqual(response.attributes["MemoryName"], "UFS")
+        self.assertEqual(
+            response.attributes["MaxPayloadSizeToTargetInBytesSupported"], "1048576"
+        )
+        self.assertIn("INFO: Calling handler for configure", response.logs)
+        self.assertIn("INFO: Storage type set to value UFS", response.logs)
+
+    def test_configure_succeeds_with_multi_block_response(self) -> None:
+        transport = FakeTransport(
+            responses=[
+                b'<?xml version="1.0" ?><data>'
+                b'<log value="INFO: handler" /></data>'
+                b'<?xml version="1.0" ?><data>'
+                b'<response value="ACK" MemoryName="UFS" '
+                b'MaxPayloadSizeToTargetInBytesSupported="1048576" '
+                b'MaxPayloadSizeFromTargetInBytes="8192" '
+                b'MaxXMLSizeInBytes="4096" SECTOR_SIZE_IN_BYTES="4096" /></data>'
+            ]
+        )
+        client = FirehoseClient(transport, FirehoseConfig(memory="ufs"))
+
+        client.configure()
+
+        self.assertEqual(client.config.memory, "ufs")
+        self.assertEqual(client.config.max_payload_to_target, 1048576)
+
+
+class ConfigureRetryTests(unittest.TestCase):
+    def test_configure_retries_on_os_timeout_and_succeeds(self) -> None:
+        transport = FailThenSucceedTransport(
+            fail_count=2,
+            exc=OSError(60, "Operation timed out"),
+            success_response=(
+                b'<?xml version="1.0" ?><data>'
+                b'<response value="ACK" MemoryName="UFS" '
+                b'MaxPayloadSizeToTargetInBytesSupported="4096" />'
+                b"</data>"
+            ),
+        )
+        client = FirehoseClient(transport, FirehoseConfig(memory="ufs"))
+
+        client.configure(retries=3, retry_delay=0.0)
+
+        self.assertEqual(transport.call_count, 3)
+        self.assertEqual(client.config.max_payload_to_target, 4096)
+
+    def test_configure_retries_on_firehose_error_and_succeeds(self) -> None:
+        transport = FailThenSucceedTransport(
+            fail_count=1,
+            exc=FirehoseError("NAK"),
+            success_response=(
+                b'<?xml version="1.0" ?><data>'
+                b'<response value="ACK" MemoryName="UFS" />'
+                b"</data>"
+            ),
+        )
+        client = FirehoseClient(transport, FirehoseConfig())
+
+        client.configure(retries=3, retry_delay=0.0)
+
+        self.assertEqual(transport.call_count, 2)
+
+    def test_configure_raises_after_all_retries_exhausted(self) -> None:
+        transport = FailThenSucceedTransport(
+            fail_count=5,
+            exc=OSError(60, "Operation timed out"),
+            success_response=ACK,
+        )
+        client = FirehoseClient(transport, FirehoseConfig())
+
+        with self.assertRaises(FirehoseError) as ctx:
+            client.configure(retries=3, retry_delay=0.0)
+
+        self.assertIn("3 attempts", str(ctx.exception))
+        self.assertEqual(transport.call_count, 3)
 
 
 def _classify_write(write: bytes) -> str:
