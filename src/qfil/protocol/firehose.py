@@ -29,6 +29,10 @@ class FirehoseTransport(Protocol):
 
     def read_until(self, marker: bytes, timeout_s: float = 10.0) -> bytes: ...
 
+    def reopen(self) -> None: ...
+
+    def drain(self, timeout_ms: int = 1000, max_rounds: int = 30) -> None: ...
+
 
 @dataclass
 class FirehoseConfig:
@@ -43,6 +47,7 @@ class FirehoseConfig:
     verbose: int = 0
     always_validate: int = 0
     max_digest_table_size: int = 2048
+    ack_raw_data_every: int = 0
 
 
 class FirehoseClient:
@@ -62,7 +67,8 @@ class FirehoseClient:
             f'MaxPayloadSizeToTargetInBytes="{self.config.max_payload_to_target}" '
             f'ZLPAwareHost="{self.config.zlpawarehost}" '
             f'SkipStorageInit="{self.config.skip_storage_init}" '
-            f'SkipWrite="{self.config.skip_write}"/>'
+            f'SkipWrite="{self.config.skip_write}" '
+            f'AckRawDataEveryNumPackets="{self.config.ack_raw_data_every}"/>'
             "</data>"
         )
         response = None
@@ -80,6 +86,10 @@ class FirehoseClient:
                         retry_delay,
                     )
                     time.sleep(retry_delay)
+                    try:
+                        self.transport.reopen()
+                    except Exception:
+                        pass
                 else:
                     raise FirehoseError(
                         f"Firehose configure failed after {retries} attempts: {exc}"
@@ -258,7 +268,7 @@ class FirehoseClient:
                 written += size
                 if progress:
                     progress(entry, written, total_bytes)
-        response = self._read_response(timeout_s=30)
+        response = self._read_response(timeout_s=120)
         if not response.ack:
             raise FirehoseError(
                 f"Program failed for {entry.label}: {response.raw_text[:500]}"
@@ -344,17 +354,38 @@ class FirehoseClient:
             self.send_element(elem)
             elem.clear()
 
-    def xml(self, xml: str, timeout_s: float = 10.0) -> "FirehoseResponse":
+    def xml(
+        self, xml: str, timeout_s: float = 10.0, retries: int = 3
+    ) -> "FirehoseResponse":
         data = xml.encode("utf-8")
         if len(data) > self.config.max_xml_size:
             raise FirehoseError(
                 f"XML payload exceeds max XML size: {len(data)} > {self.config.max_xml_size}"
             )
-        self.transport.write(data)
-        response = self._read_response(timeout_s=timeout_s)
-        if not response.ack:
-            raise FirehoseError(response.raw_text[:800] or "Firehose returned NAK.")
-        return response
+        for attempt in range(retries):
+            try:
+                self.transport.write(data)
+                response = self._read_response(timeout_s=timeout_s)
+                if not response.ack:
+                    raise FirehoseError(
+                        response.raw_text[:800] or "Firehose returned NAK."
+                    )
+                return response
+            except (FirehoseError, OSError) as exc:
+                if attempt < retries - 1:
+                    log.warning(
+                        "Firehose XML attempt %d/%d failed: %s — retrying",
+                        attempt + 1,
+                        retries,
+                        exc,
+                    )
+                    try:
+                        self.transport.drain()
+                    except Exception:
+                        pass
+                    continue
+                raise
+        raise FirehoseError("Unreachable")
 
     def _read_response(self, timeout_s: float) -> "FirehoseResponse":
         raw = self.transport.read_until(b"<response", timeout_s=timeout_s)

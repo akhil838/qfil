@@ -10,6 +10,7 @@ from pathlib import Path
 from qfil.logging import get_logger
 from qfil.progress import EntryProgress
 from qfil.protocol import FirehoseClient, FirehoseConfig, SaharaClient
+from qfil.protocol.sahara import SaharaError
 from qfil.software_fix import (
     QfilPlan,
     parse_program_entries,
@@ -37,26 +38,49 @@ def run_qfil_plan(plan: QfilPlan, dry_run: bool = True) -> None:
     get_logger(__name__).info("Opening Qualcomm 9008 USB transport for Sahara/Firehose")
     progress = EntryProgress("firehose")
     with QualcommUsbTransport.auto() as transport:
-        get_logger(__name__).info(
-            "Uploading programmer: %s image_id=%s",
-            plan.programmer.loader,
-            plan.programmer.image_id,
-        )
-        SaharaClient(transport).upload_programmer(
-            plan.programmer.loader, plan.programmer.image_id
-        )
-        _reopen_transport_for_firehose(transport)
+        sahara_done = False
+        if transport.pid == 0x9008:
+            get_logger(__name__).info(
+                "Uploading programmer: %s image_id=%s",
+                plan.programmer.loader,
+                plan.programmer.image_id,
+            )
+            try:
+                SaharaClient(transport).upload_programmer(
+                    plan.programmer.loader, plan.programmer.image_id
+                )
+                sahara_done = True
+            except SaharaError as exc:
+                get_logger(__name__).warning(
+                    "Sahara upload failed (%s), device may already be in Firehose mode",
+                    exc,
+                )
+        else:
+            get_logger(__name__).info(
+                "Device already in Firehose mode (PID %04x), skipping Sahara",
+                transport.pid,
+            )
+        if sahara_done:
+            _reopen_transport_for_firehose(transport)
+        else:
+            transport.reopen()
         client = FirehoseClient(
             transport,
             FirehoseConfig(
                 memory=plan.firehose.memory or "ufs",
-                zlpawarehost=1 if plan.firehose.zlpawarehost else 0,
+                zlpawarehost=1,
             ),
         )
         get_logger(__name__).info(
             "Configuring Firehose: memory=%s", plan.firehose.memory or "ufs"
         )
         client.configure()
+        get_logger(__name__).info(
+            "Firehose ready: memory=%s max_payload=%s sector_size=%s",
+            client.config.memory,
+            client.config.max_payload_to_target,
+            client.config.sector_size,
+        )
         if plan.firehose.set_active_partition is not None:
             get_logger(__name__).info(
                 "Setting active storage drive: %s",
@@ -82,15 +106,18 @@ def run_qfil_plan(plan: QfilPlan, dry_run: bool = True) -> None:
 def _reopen_transport_for_firehose(transport: QualcommUsbTransport) -> None:
     get_logger(__name__).info("Reopening USB transport for Firehose")
     transport.close()
-    deadline = time.monotonic() + 8
+    # Wait for programmer to boot and USB to re-enumerate
+    time.sleep(2)
+    deadline = time.monotonic() + 10
     last_error: Exception | None = None
     while time.monotonic() < deadline:
-        time.sleep(0.25)
         try:
             transport.open()
+            transport.drain()
             return
         except (UsbTransportError, OSError) as exc:
             last_error = exc
+            time.sleep(0.5)
     raise UsbTransportError(
         "Programmer upload completed, but Qualcomm USB transport did not reopen for Firehose."
     ) from last_error
