@@ -358,7 +358,7 @@ class ConfigureRetryTests(unittest.TestCase):
 
     def test_configure_raises_after_all_retries_exhausted(self) -> None:
         transport = FailThenSucceedTransport(
-            fail_count=5,
+            fail_count=100,
             exc=OSError(60, "Operation timed out"),
             success_response=ACK,
         )
@@ -368,7 +368,8 @@ class ConfigureRetryTests(unittest.TestCase):
             client.configure(retries=3, retry_delay=0.0)
 
         self.assertIn("3 attempts", str(ctx.exception))
-        self.assertEqual(transport.call_count, 3)
+        # 3 configure retries × 3 xml retries = 9 transport calls
+        self.assertEqual(transport.call_count, 9)
 
 
 def _classify_write(write: bytes) -> str:
