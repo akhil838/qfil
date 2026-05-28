@@ -29,6 +29,10 @@ class FirehoseTransport(Protocol):
 
     def read_until(self, marker: bytes, timeout_s: float = 10.0) -> bytes: ...
 
+    def reopen(self) -> None: ...
+
+    def drain(self, timeout_ms: int = 1000, max_rounds: int = 30) -> None: ...
+
 
 @dataclass
 class FirehoseConfig:
@@ -82,11 +86,10 @@ class FirehoseClient:
                         retry_delay,
                     )
                     time.sleep(retry_delay)
-                    if hasattr(self.transport, "reopen"):
-                        try:
-                            self.transport.reopen()
-                        except Exception:
-                            pass
+                    try:
+                        self.transport.reopen()
+                    except Exception:
+                        pass
                 else:
                     raise FirehoseError(
                         f"Firehose configure failed after {retries} attempts: {exc}"
@@ -376,11 +379,10 @@ class FirehoseClient:
                         retries,
                         exc,
                     )
-                    if hasattr(self.transport, "drain"):
-                        try:
-                            self.transport.drain()
-                        except Exception:
-                            pass
+                    try:
+                        self.transport.drain()
+                    except Exception:
+                        pass
                     continue
                 raise
         raise FirehoseError("Unreachable")
